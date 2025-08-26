@@ -1,7 +1,11 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-import json
+from rest_framework.permissions import AllowAny
+from django.contrib.auth.models import User
+from django.contrib.auth import authenticate, login as django_login, logout as django_logout
+from django.db import transaction
+from .models import Profile
 
 
 def _run_metta_via_python_api(code: str):
@@ -61,3 +65,63 @@ def execute_metta(request):
         return Response({"result": result})
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@transaction.atomic
+def register(request):
+    payload = request.data or {}
+    username = payload.get("username")
+    email = payload.get("email")
+    password = payload.get("password")
+    user_type = payload.get("userType", "other")
+
+    if not username or not email or not password:
+        return Response({"message": "username, email, password required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if User.objects.filter(username=username).exists():
+        return Response({"message": "username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = User.objects.create_user(username=username, email=email, password=password)
+    Profile.objects.create(user=user, user_type=user_type if user_type in dict(Profile.USER_TYPE_CHOICES) else "other")
+
+    return Response({
+        "user": {"id": user.id, "username": user.username, "email": user.email}
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def login(request):
+    payload = request.data or {}
+    username = payload.get("username")
+    password = payload.get("password")
+    user_type = payload.get("userType")
+
+    if not username or not password:
+        return Response({"message": "username and password required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return Response({"message": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+
+    # Optionally check user_type match if exists
+    try:
+        profile = user.profile
+        if user_type and profile.user_type != user_type:
+            return Response({"message": "User type mismatch"}, status=status.HTTP_400_BAD_REQUEST)
+    except Profile.DoesNotExist:
+        profile = None
+
+    django_login(request, user)
+    return Response({
+        "user": {"id": user.id, "username": user.username, "email": user.email},
+        # In the future, issue JWT; for now, session-based
+    })
+
+
+@api_view(["POST"])
+def logout(request):
+    django_logout(request)
+    return Response({"message": "Logged out"})
